@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 #import <string.h>
@@ -33,7 +34,6 @@ static uintptr_t get_unity_base() {
             return (uintptr_t)_dyld_get_image_header(i);
         }
     }
-    // Fallback to main header if mono/unity embedded in main binary
     if (count > 0) {
         return (uintptr_t)_dyld_get_image_header(0);
     }
@@ -212,126 +212,45 @@ static void apply_all_patches() {
 }
 
 // ==========================================
-// TOP-LEVEL TRANSPARENT OVERLAY WINDOW
+// MOD MENU UI IMPLEMENTATION
 // ==========================================
-@interface MenuOverlayWindow : UIWindow
-@end
-
-@interface MenuRootVC : UIViewController
-@end
-
-@implementation MenuRootVC
-- (BOOL)shouldAutorotate { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
-@end
-
 @interface ModMenuUI : NSObject
-+ (void)startPollingInit;
-+ (void)setupMenu;
++ (void)setupMenuWithParent:(UIView *)parentView;
++ (void)toggleMenu;
 @end
 
-static MenuOverlayWindow *menuWindow = nil;
 static UIButton *floatingBtn = nil;
 static UIView *menuView = nil;
 static UIScrollView *scrollView = nil;
-static NSTimer *initTimer = nil;
-static BOOL isMenuInitialized = NO;
-
-@implementation MenuOverlayWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hitView = [super hitTest:point withEvent:event];
-    if (hitView == self || hitView == self.rootViewController.view) {
-        return nil; // Pass touches straight down to Unity Game!
-    }
-    return hitView;
-}
-@end
+static BOOL isMenuAttached = NO;
 
 @implementation ModMenuUI
 
-+ (void)startPollingInit {
-    if (isMenuInitialized) return;
-    initTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(checkAndInit) userInfo:nil repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:initTimer forMode:NSRunLoopCommonModes];
-}
-
-+ (void)checkAndInit {
-    if (isMenuInitialized) {
-        [initTimer invalidate];
-        initTimer = nil;
++ (void)setupMenuWithParent:(UIView *)parentView {
+    if (!parentView) return;
+    if (isMenuAttached && floatingBtn && floatingBtn.superview) {
+        [parentView bringSubviewToFront:floatingBtn];
+        if (menuView) [parentView bringSubviewToFront:menuView];
         return;
     }
-    
-    UIWindow *keyWindow = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                for (UIWindow *w in ws.windows) {
-                    if (w.isKeyWindow || w.rootViewController != nil) {
-                        keyWindow = w;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (!keyWindow) {
-        keyWindow = [UIApplication sharedApplication].keyWindow;
-    }
-    if (!keyWindow && [UIApplication sharedApplication].windows.count > 0) {
-        keyWindow = [UIApplication sharedApplication].windows.firstObject;
-    }
-    
-    if (keyWindow != nil && keyWindow.rootViewController != nil) {
-        [initTimer invalidate];
-        initTimer = nil;
-        [self setupMenu];
-    }
-}
-
-+ (void)setupMenu {
-    if (isMenuInitialized) return;
-    isMenuInitialized = YES;
+    isMenuAttached = YES;
 
     // Apply memory patches
     unity_base = get_unity_base();
     backup_original_bytes();
     apply_all_patches();
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
-        
-        // Create Dedicated Always-On-Top Overlay Window
-        if (@available(iOS 13.0, *)) {
-            UIWindowScene *windowScene = nil;
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    windowScene = (UIWindowScene *)scene;
-                    break;
-                }
-            }
-            if (windowScene) {
-                menuWindow = [[MenuOverlayWindow alloc] initWithWindowScene:windowScene];
-            }
-        }
-        if (!menuWindow) {
-            menuWindow = [[MenuOverlayWindow alloc] initWithFrame:screenBounds];
-        }
-        
-        menuWindow.windowLevel = UIWindowLevelAlert + 1000.0;
-        menuWindow.backgroundColor = [UIColor clearColor];
-        menuWindow.rootViewController = [[MenuRootVC alloc] init];
-        menuWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-        menuWindow.hidden = NO;
-        [menuWindow makeKeyAndVisible];
+    CGRect screenBounds = parentView.bounds;
+    CGFloat screenW = screenBounds.size.width;
+    CGFloat screenH = screenBounds.size.height;
 
-        // 1. Floating Icon Button (Draggable)
+    // 1. Floating Button (Draggable)
+    if (!floatingBtn) {
         floatingBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingBtn.frame = CGRectMake(30, 80, 56, 56);
         floatingBtn.layer.cornerRadius = 28.0;
         floatingBtn.clipsToBounds = YES;
-        floatingBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.14 blue:0.22 alpha:0.92];
+        floatingBtn.backgroundColor = [UIColor colorWithRed:0.1 green:0.12 blue:0.22 alpha:0.94];
         floatingBtn.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
         floatingBtn.layer.borderWidth = 2.5;
         [floatingBtn setTitle:@"⚔️" forState:UIControlStateNormal];
@@ -340,11 +259,12 @@ static BOOL isMenuInitialized = NO;
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [floatingBtn addGestureRecognizer:pan];
         [floatingBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
-        [menuWindow addSubview:floatingBtn];
+    }
+    [parentView addSubview:floatingBtn];
+    [parentView bringSubviewToFront:floatingBtn];
 
-        // 2. Main Menu Panel (Dark Cyber Theme)
-        CGFloat screenW = screenBounds.size.width;
-        CGFloat screenH = screenBounds.size.height;
+    // 2. Main Menu Window
+    if (!menuView) {
         CGFloat menuW = MIN(320, screenW - 40);
         CGFloat menuH = MIN(460, screenH - 80);
         
@@ -397,15 +317,9 @@ static BOOL isMenuInitialized = NO;
         closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
         [closeBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
         [menuView addSubview:closeBtn];
-
-        [menuWindow addSubview:menuView];
-
-        // Fallback 3-finger double tap gesture to show menu anytime
-        UITapGestureRecognizer *triTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleMenu)];
-        triTap.numberOfTouchesRequired = 3;
-        triTap.numberOfTapsRequired = 2;
-        [menuWindow addGestureRecognizer:triTap];
-    });
+    }
+    [parentView addSubview:menuView];
+    [parentView bringSubviewToFront:menuView];
 }
 
 + (void)addToggle:(NSString *)title state:(BOOL)state tag:(NSInteger)tag y:(CGFloat *)y w:(CGFloat)w {
@@ -479,11 +393,16 @@ static BOOL isMenuInitialized = NO;
 }
 
 + (void)toggleMenu {
+    if (!menuView) return;
     menuView.hidden = !menuView.hidden;
+    if (menuView.superview) {
+        [menuView.superview bringSubviewToFront:menuView];
+    }
 }
 
 + (void)handlePan:(UIPanGestureRecognizer *)pan {
     UIView *superview = floatingBtn.superview;
+    if (!superview) return;
     CGPoint translation = [pan translationInView:superview];
     floatingBtn.center = CGPointMake(floatingBtn.center.x + translation.x, floatingBtn.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:superview];
@@ -491,7 +410,46 @@ static BOOL isMenuInitialized = NO;
 
 @end
 
+// ==========================================
+// SWIZZLE VIEWCONTROLLER (GUARANTEED INJECTION)
+// ==========================================
+static void (*orig_UIViewController_viewDidAppear)(id self, SEL _cmd, BOOL animated);
+
+static void swizzle_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    if (orig_UIViewController_viewDidAppear) {
+        orig_UIViewController_viewDidAppear(self, _cmd, animated);
+    }
+    
+    // Attach menu directly to the active visible ViewController view!
+    if (self.view) {
+        [ModMenuUI setupMenuWithParent:self.view];
+    }
+}
+
+// ==========================================
+// CONSTRUCTOR & METHOD SWIZZLING
+// ==========================================
 __attribute__((constructor))
 static void init_mod_menu() {
-    [ModMenuUI startPollingInit];
+    // 1. Swizzle UIViewController viewDidAppear
+    Class vcClass = [UIViewController class];
+    SEL sel = @selector(viewDidAppear:);
+    Method m = class_getInstanceMethod(vcClass, sel);
+    if (m) {
+        orig_UIViewController_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)swizzle_viewDidAppear);
+    }
+
+    // 2. Continuous Polling Timer (attach to keyWindow / rootVC view)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+            if (!kw && [UIApplication sharedApplication].windows.count > 0) {
+                kw = [UIApplication sharedApplication].windows.firstObject;
+            }
+            if (kw && kw.rootViewController && kw.rootViewController.view) {
+                [ModMenuUI setupMenuWithParent:kw.rootViewController.view];
+            }
+        }];
+    });
 }
