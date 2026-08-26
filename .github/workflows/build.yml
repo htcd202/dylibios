@@ -7,11 +7,11 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-latest
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Install Theos and Dependencies
       run: |
@@ -27,7 +27,7 @@ jobs:
         make package FINALPACKAGE=1
 
     - name: Upload .deb and .dylib Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: Kritika_v5.30.2_ModMenu
         path: |
