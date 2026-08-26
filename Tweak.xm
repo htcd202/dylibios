@@ -3,6 +3,8 @@
 #import <mach/mach.h>
 #import <string.h>
 
+extern void sys_icache_invalidate(void *start, size_t len);
+
 // ==========================================
 // GLOBALS & TOGGLES / SLIDERS STATE
 // ==========================================
@@ -31,14 +33,18 @@ static uintptr_t get_unity_base() {
             return (uintptr_t)_dyld_get_image_header(i);
         }
     }
+    // Fallback to main header if mono/unity embedded in main binary
+    if (count > 0) {
+        return (uintptr_t)_dyld_get_image_header(0);
+    }
     return 0;
 }
 
 static bool write_mem(uintptr_t addr, const void *data, size_t len) {
+    if (!addr || !data || len == 0) return false;
     kern_return_t kr;
     mach_port_t task = mach_task_self();
     
-    // Make page writable
     uintptr_t page = addr & ~(uintptr_t)(0xFFF);
     kr = vm_protect(task, (vm_address_t)page, 0x4000, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
@@ -48,51 +54,22 @@ static bool write_mem(uintptr_t addr, const void *data, size_t len) {
     
     memcpy((void *)addr, data, len);
     
-    // Restore to RX
     vm_protect(task, (vm_address_t)page, 0x4000, false, VM_PROT_READ | VM_PROT_EXECUTE);
-    
-    // Clear instruction cache
     sys_icache_invalidate((void *)addr, len);
-    
     return true;
 }
 
 // ==========================================
 // PATCH DEFINITIONS (v5.30.2 RVAs)
 // ==========================================
-// ARM64 Encodings:
-// return double: MOVZ X0, #imm16, LSL #48; FMOV D0, X0; RET (12 bytes)
-// return 0.0 double: MOVZ X0, #0; FMOV D0, X0; RET (12 bytes)
-// return float: MOVZ W0, #imm16, LSL #16; FMOV S0, W0; RET (12 bytes)
-// return int: MOVZ W0, #val; RET (8 bytes)
-// RET: 0xD65F03C0 (4 bytes)
-
-typedef struct {
-    uintptr_t rva;
-    uint8_t patch[16];
-    uint8_t orig[16];
-    size_t size;
-    const char *name;
-    BOOL *toggle;      // NULL = always on, otherwise pointer to toggle
-    float *slider;     // NULL = no slider, otherwise pointer to slider value
-    uint16_t upper16;  // For slider-based double patches
-} PatchEntry;
-
-// Pre-built ARM64 patch bytes
-// return 0.0 double (God Mode): MOVZ X0, #0; FMOV D0, X0; RET
 static uint8_t patch_zero_double[] = {0x00,0x00,0x80,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
-// return 1.0 double (Inf Mana): MOVZ X0, #0x3FF0, LSL #48; FMOV D0, X0; RET
-static uint8_t patch_1_0_double[] = {0x00,0xE0,0xDF,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
-// return 100.0 double (DblAtk): MOVZ X0, #0x4059, LSL #48; FMOV D0, X0; RET
-static uint8_t patch_100_double[] = {0x20,0x0B,0xE0,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
-// return 2.0 double (DblAtkDmg): MOVZ X0, #0x4000, LSL #48; FMOV D0, X0; RET
-static uint8_t patch_2_0_double[] = {0x00,0x00,0xE0,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
-// return int 1 (MonsterLv1): MOVZ W0, #1; RET
-static uint8_t patch_int_1[] = {0x20,0x00,0x80,0x52, 0xC0,0x03,0x5F,0xD6};
-// RET (4 bytes)
-static uint8_t patch_ret[] = {0xC0,0x03,0x5F,0xD6};
+static uint8_t patch_1_0_double[]  = {0x00,0xE0,0xDF,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
+static uint8_t patch_100_double[]  = {0x20,0x0B,0xE0,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
+static uint8_t patch_2_0_double[]  = {0x00,0x00,0xE0,0xD2, 0x00,0x00,0x67,0x9E, 0xC0,0x03,0x5F,0xD6};
+static uint8_t patch_int_1[]       = {0x20,0x00,0x80,0x52, 0xC0,0x03,0x5F,0xD6};
+static uint8_t patch_ret[]         = {0xC0,0x03,0x5F,0xD6};
 
-// Backup storage for original bytes
+// Backup storage
 static uint8_t orig_godmode[12];
 static uint8_t orig_infmana[12];
 static uint8_t orig_dblatkchance[12];
@@ -133,45 +110,30 @@ static void backup_original_bytes() {
     backupsDone = YES;
 }
 
-// Build ARM64 "return double(val)" patch at runtime
 static void build_double_patch(uint8_t *buf, double val) {
     uint64_t bits;
     memcpy(&bits, &val, 8);
     uint16_t upper16 = (uint16_t)(bits >> 48);
-    
-    // MOVZ X0, #upper16, LSL #48
     uint32_t movz = 0xD2E00000 | ((uint32_t)upper16 << 5);
-    // FMOV D0, X0
     uint32_t fmov = 0x9E670000;
-    // RET
-    uint32_t ret = 0xD65F03C0;
-    
+    uint32_t ret  = 0xD65F03C0;
     memcpy(buf + 0, &movz, 4);
     memcpy(buf + 4, &fmov, 4);
     memcpy(buf + 8, &ret, 4);
 }
 
-// Build ARM64 "return float(val)" patch at runtime
 static void build_float_patch(uint8_t *buf, float val) {
     uint32_t bits;
     memcpy(&bits, &val, 4);
     uint16_t upper16 = (uint16_t)(bits >> 16);
-    
-    // MOVZ W0, #upper16, LSL #16
     uint32_t movz = 0x52A00000 | ((uint32_t)upper16 << 5);
-    // FMOV S0, W0
     uint32_t fmov = 0x1E270000;
-    // RET
-    uint32_t ret = 0xD65F03C0;
-    
+    uint32_t ret  = 0xD65F03C0;
     memcpy(buf + 0, &movz, 4);
     memcpy(buf + 4, &fmov, 4);
     memcpy(buf + 8, &ret, 4);
 }
 
-// ==========================================
-// APPLY / RESTORE PATCHES
-// ==========================================
 static void apply_toggle(uintptr_t rva, uint8_t *patch, size_t sz, uint8_t *orig, BOOL enable) {
     if (!unity_base) return;
     uintptr_t addr = unity_base + rva;
@@ -219,7 +181,11 @@ static void apply_slider_float(uintptr_t rva, float val, uint8_t *orig) {
 }
 
 static void apply_all_patches() {
-    if (!unity_base || !backupsDone) return;
+    if (!unity_base) {
+        unity_base = get_unity_base();
+    }
+    if (!unity_base) return;
+    if (!backupsDone) backup_original_bytes();
     
     // Toggles
     apply_toggle(0x1948008, patch_zero_double, 12, orig_godmode, isGodMode);
@@ -246,87 +212,153 @@ static void apply_all_patches() {
 }
 
 // ==========================================
-// FLOATING MOD MENU UI (Objective-C UIKit)
+// TOP-LEVEL TRANSPARENT OVERLAY WINDOW
 // ==========================================
+@interface MenuOverlayWindow : UIWindow
+@end
+
+@interface MenuRootVC : UIViewController
+@end
+
+@implementation MenuRootVC
+- (BOOL)shouldAutorotate { return YES; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
+@end
+
 @interface ModMenuUI : NSObject
++ (void)startPollingInit;
 + (void)setupMenu;
+@end
+
+static MenuOverlayWindow *menuWindow = nil;
+static UIButton *floatingBtn = nil;
+static UIView *menuView = nil;
+static UIScrollView *scrollView = nil;
+static NSTimer *initTimer = nil;
+static BOOL isMenuInitialized = NO;
+
+@implementation MenuOverlayWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    if (hitView == self || hitView == self.rootViewController.view) {
+        return nil; // Pass touches straight down to Unity Game!
+    }
+    return hitView;
+}
 @end
 
 @implementation ModMenuUI
 
-static UIButton *floatingBtn = nil;
-static UIView *menuView = nil;
-static UIScrollView *scrollView = nil;
++ (void)startPollingInit {
+    if (isMenuInitialized) return;
+    initTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(checkAndInit) userInfo:nil repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:initTimer forMode:NSRunLoopCommonModes];
+}
 
-+ (void)setupMenu {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Get Unity base and backup original bytes
-        unity_base = get_unity_base();
-        if (!unity_base) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                unity_base = get_unity_base();
-                if (unity_base) {
-                    backup_original_bytes();
-                    apply_all_patches();
-                }
-            });
-        } else {
-            backup_original_bytes();
-            apply_all_patches();
-        }
-        
-        UIWindow *keyWindow = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if (scene.activationState == UISceneActivationStateForegroundActive) {
-                    for (UIWindow *w in scene.windows) {
-                        if (w.isKeyWindow) { keyWindow = w; break; }
++ (void)checkAndInit {
+    if (isMenuInitialized) {
+        [initTimer invalidate];
+        initTimer = nil;
+        return;
+    }
+    
+    UIWindow *keyWindow = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                for (UIWindow *w in ws.windows) {
+                    if (w.isKeyWindow || w.rootViewController != nil) {
+                        keyWindow = w;
+                        break;
                     }
                 }
             }
         }
-        if (!keyWindow) {
-            keyWindow = [UIApplication sharedApplication].keyWindow;
-        }
-        if (!keyWindow) {
-            NSArray *windows = [UIApplication sharedApplication].windows;
-            if (windows.count > 0) keyWindow = windows[0];
-        }
-        if (!keyWindow) return;
+    }
+    if (!keyWindow) {
+        keyWindow = [UIApplication sharedApplication].keyWindow;
+    }
+    if (!keyWindow && [UIApplication sharedApplication].windows.count > 0) {
+        keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    }
+    
+    if (keyWindow != nil && keyWindow.rootViewController != nil) {
+        [initTimer invalidate];
+        initTimer = nil;
+        [self setupMenu];
+    }
+}
 
-        // Floating Icon Button
++ (void)setupMenu {
+    if (isMenuInitialized) return;
+    isMenuInitialized = YES;
+
+    // Apply memory patches
+    unity_base = get_unity_base();
+    backup_original_bytes();
+    apply_all_patches();
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        
+        // Create Dedicated Always-On-Top Overlay Window
+        if (@available(iOS 13.0, *)) {
+            UIWindowScene *windowScene = nil;
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    windowScene = (UIWindowScene *)scene;
+                    break;
+                }
+            }
+            if (windowScene) {
+                menuWindow = [[MenuOverlayWindow alloc] initWithWindowScene:windowScene];
+            }
+        }
+        if (!menuWindow) {
+            menuWindow = [[MenuOverlayWindow alloc] initWithFrame:screenBounds];
+        }
+        
+        menuWindow.windowLevel = UIWindowLevelAlert + 1000.0;
+        menuWindow.backgroundColor = [UIColor clearColor];
+        menuWindow.rootViewController = [[MenuRootVC alloc] init];
+        menuWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
+        menuWindow.hidden = NO;
+        [menuWindow makeKeyAndVisible];
+
+        // 1. Floating Icon Button (Draggable)
         floatingBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-        floatingBtn.frame = CGRectMake(20, 100, 55, 55);
-        floatingBtn.layer.cornerRadius = 27.5;
+        floatingBtn.frame = CGRectMake(30, 80, 56, 56);
+        floatingBtn.layer.cornerRadius = 28.0;
         floatingBtn.clipsToBounds = YES;
-        floatingBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.25 alpha:0.9];
-        floatingBtn.layer.borderColor = [UIColor colorWithRed:0.2 green:0.8 blue:1.0 alpha:1.0].CGColor;
-        floatingBtn.layer.borderWidth = 2.0;
+        floatingBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.14 blue:0.22 alpha:0.92];
+        floatingBtn.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
+        floatingBtn.layer.borderWidth = 2.5;
         [floatingBtn setTitle:@"⚔️" forState:UIControlStateNormal];
         floatingBtn.titleLabel.font = [UIFont systemFontOfSize:28];
 
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [floatingBtn addGestureRecognizer:pan];
         [floatingBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
-        [keyWindow addSubview:floatingBtn];
+        [menuWindow addSubview:floatingBtn];
 
-        // Main Menu Window
-        CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
-        CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+        // 2. Main Menu Panel (Dark Cyber Theme)
+        CGFloat screenW = screenBounds.size.width;
+        CGFloat screenH = screenBounds.size.height;
         CGFloat menuW = MIN(320, screenW - 40);
-        CGFloat menuH = MIN(480, screenH - 120);
+        CGFloat menuH = MIN(460, screenH - 80);
         
-        menuView = [[UIView alloc] initWithFrame:CGRectMake((screenW - menuW)/2, 60, menuW, menuH)];
-        menuView.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:0.96];
+        menuView = [[UIView alloc] initWithFrame:CGRectMake((screenW - menuW)/2, (screenH - menuH)/2, menuW, menuH)];
+        menuView.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.14 alpha:0.96];
         menuView.layer.cornerRadius = 16;
-        menuView.layer.borderColor = [UIColor colorWithRed:0.2 green:0.7 blue:1.0 alpha:0.8].CGColor;
-        menuView.layer.borderWidth = 1.5;
+        menuView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:0.9].CGColor;
+        menuView.layer.borderWidth = 2.0;
         menuView.clipsToBounds = YES;
         menuView.hidden = YES;
 
         // Header Title
-        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, menuW, 30)];
-        titleLabel.text = @"⚔️ KRITIKA v5.30.2 MOD MENU";
+        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 12, menuW, 26)];
+        titleLabel.text = @"⚔️ KRITIKA MOD MENU v5.30.2";
         titleLabel.textColor = [UIColor cyanColor];
         titleLabel.textAlignment = NSTextAlignmentCenter;
         titleLabel.font = [UIFont boldSystemFontOfSize:15];
@@ -353,12 +385,12 @@ static UIScrollView *scrollView = nil;
         [self addSlider:@"🏃 Tốc Độ Chạy" min:1.0 max:10.0 val:moveSpeed tag:103 y:&y w:menuW-40];
         [self addSlider:@"⏳ Tua Nhanh Map" min:1.0 max:5.0 val:timeScale tag:104 y:&y w:menuW-40];
 
-        scrollView.contentSize = CGSizeMake(menuW - 40, y + 10);
+        scrollView.contentSize = CGSizeMake(menuW - 40, y + 15);
 
         // Close Button
         UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        closeBtn.frame = CGRectMake(20, menuH - 45, menuW - 40, 35);
-        closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:0.9 alpha:0.9];
+        closeBtn.frame = CGRectMake(20, menuH - 44, menuW - 40, 36);
+        closeBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.55 blue:0.85 alpha:0.95];
         closeBtn.layer.cornerRadius = 8;
         [closeBtn setTitle:@"Đóng Menu" forState:UIControlStateNormal];
         [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -366,7 +398,13 @@ static UIScrollView *scrollView = nil;
         [closeBtn addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
         [menuView addSubview:closeBtn];
 
-        [keyWindow addSubview:menuView];
+        [menuWindow addSubview:menuView];
+
+        // Fallback 3-finger double tap gesture to show menu anytime
+        UITapGestureRecognizer *triTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleMenu)];
+        triTap.numberOfTouchesRequired = 3;
+        triTap.numberOfTapsRequired = 2;
+        [menuWindow addGestureRecognizer:triTap];
     });
 }
 
@@ -390,7 +428,7 @@ static UIScrollView *scrollView = nil;
 + (void)addSlider:(NSString *)title min:(float)min max:(float)max val:(float)val tag:(NSInteger)tag y:(CGFloat *)y w:(CGFloat)w {
     UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(5, *y, w - 70, 20)];
     lbl.text = title;
-    lbl.textColor = [UIColor colorWithRed:0.4 green:0.8 blue:1.0 alpha:1.0];
+    lbl.textColor = [UIColor colorWithRed:0.4 green:0.85 blue:1.0 alpha:1.0];
     lbl.font = [UIFont boldSystemFontOfSize:12];
     [scrollView addSubview:lbl];
 
@@ -453,10 +491,7 @@ static UIScrollView *scrollView = nil;
 
 @end
 
-// ==========================================
-// INITIALIZATION (No CydiaSubstrate needed!)
-// ==========================================
 __attribute__((constructor))
 static void init_mod_menu() {
-    [ModMenuUI setupMenu];
+    [ModMenuUI startPollingInit];
 }
