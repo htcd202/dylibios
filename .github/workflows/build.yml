@@ -16,15 +16,18 @@ jobs:
     - name: Set up Theos and iOS SDK
       run: |
         echo "=== Installing Theos ==="
-        git clone --recursive https://github.com/theos/theos.git ~/theos
-        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+        export THEOS=~/theos
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
         
         echo "=== Installing iOS SDKs ==="
-        git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
+        rm -rf $THEOS/sdks/*
+        git clone --depth=1 https://github.com/theos/sdks.git ~/theos-sdks
+        cp -r ~/theos-sdks/*.sdk $THEOS/sdks/
 
     - name: Compile and Package Mod Menu
       run: |
-        export THEOS=$HOME/theos
+        export THEOS=~/theos
         make clean
         make package FINALPACKAGE=1
 
