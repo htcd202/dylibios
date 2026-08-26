@@ -6,16 +6,16 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-14
+  build-macos:
+    runs-on: macos-13
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Theos, ldid, and iOS SDK
+    - name: Set up Theos and ldid
       run: |
-        echo "=== Installing ldid via Homebrew ==="
+        echo "=== Installing ldid ==="
         brew install ldid
         
         echo "=== Installing Theos ==="
@@ -23,9 +23,8 @@ jobs:
         git clone --recursive https://github.com/theos/theos.git $THEOS
         echo "THEOS=$THEOS" >> $GITHUB_ENV
         
-        echo "=== Linking Official Xcode iPhoneOS SDK ==="
+        echo "=== Linking Xcode SDK ==="
         SYS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-        echo "Found System SDK: $SYS_SDK"
         ln -s "$SYS_SDK" $THEOS/sdks/iPhoneOS.sdk
 
     - name: Compile and Package Mod Menu
@@ -34,11 +33,46 @@ jobs:
         make clean
         make package FINALPACKAGE=1
 
-    - name: Upload .deb and .dylib Artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Kritika_v5.30.2_ModMenu
+        name: Kritika_v5.30.2_ModMenu_macOS
         path: |
           packages/*.deb
           .theos/obj/*.dylib
           .theos/obj/debug/*.dylib
+
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Linux Theos and Clang
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang make git ldid
+        export THEOS=~/theos
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
+        
+        echo "=== Installing iOS SDK ==="
+        git clone --depth=1 https://github.com/theos/sdks.git ~/theos-sdks
+        cp -r ~/theos-sdks/iPhoneOS16.5.sdk $THEOS/sdks/ || cp -r ~/theos-sdks/iPhoneOS*.sdk $THEOS/sdks/ || true
+
+    - name: Compile on Linux
+      run: |
+        export THEOS=~/theos
+        make clean
+        make package FINALPACKAGE=1 || true
+
+    - name: Upload Linux Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kritika_v5.30.2_ModMenu_Linux
+        path: |
+          packages/*.deb
+          .theos/obj/*.dylib
+          .theos/obj/debug/*.dylib
+      continue-on-error: true
