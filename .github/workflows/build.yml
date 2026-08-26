@@ -20,10 +20,18 @@ jobs:
         git clone --recursive https://github.com/theos/theos.git $THEOS
         echo "THEOS=$THEOS" >> $GITHUB_ENV
         
-        echo "=== Installing iOS SDKs ==="
-        rm -rf $THEOS/sdks/*
-        git clone --depth=1 https://github.com/theos/sdks.git ~/theos-sdks
-        cp -r ~/theos-sdks/*.sdk $THEOS/sdks/
+        echo "=== Linking Official Xcode iPhoneOS SDK ==="
+        SYS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+        echo "Found System SDK: $SYS_SDK"
+        ln -s "$SYS_SDK" $THEOS/sdks/iPhoneOS.sdk
+        
+        echo "=== Downloading Patched iOS SDKs ==="
+        git clone --depth=1 https://github.com/theos/sdks.git ~/theos-sdks || true
+        for sdk in ~/theos-sdks/iPhoneOS*.sdk; do
+          if [ -d "$sdk" ]; then
+            cp -R "$sdk" $THEOS/sdks/ 2>/dev/null || true
+          fi
+        done
 
     - name: Compile and Package Mod Menu
       run: |
