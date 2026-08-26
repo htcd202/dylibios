@@ -13,8 +13,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Theos and iOS SDK
+    - name: Set up Theos, ldid, and iOS SDK
       run: |
+        echo "=== Installing ldid via Homebrew ==="
+        brew install ldid
+        
         echo "=== Installing Theos ==="
         export THEOS=~/theos
         git clone --recursive https://github.com/theos/theos.git $THEOS
@@ -24,14 +27,6 @@ jobs:
         SYS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
         echo "Found System SDK: $SYS_SDK"
         ln -s "$SYS_SDK" $THEOS/sdks/iPhoneOS.sdk
-        
-        echo "=== Downloading Patched iOS SDKs ==="
-        git clone --depth=1 https://github.com/theos/sdks.git ~/theos-sdks || true
-        for sdk in ~/theos-sdks/iPhoneOS*.sdk; do
-          if [ -d "$sdk" ]; then
-            cp -R "$sdk" $THEOS/sdks/ 2>/dev/null || true
-          fi
-        done
 
     - name: Compile and Package Mod Menu
       run: |
@@ -45,4 +40,5 @@ jobs:
         name: Kritika_v5.30.2_ModMenu
         path: |
           packages/*.deb
+          .theos/obj/*.dylib
           .theos/obj/debug/*.dylib
