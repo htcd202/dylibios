@@ -6,7 +6,8 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = KritikaModMenu
 
 KritikaModMenu_FILES = Tweak.xm
-KritikaModMenu_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+KritikaModMenu_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Iinclude
+KritikaModMenu_LDFLAGS = -undefined dynamic_lookup
 KritikaModMenu_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk

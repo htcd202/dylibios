@@ -7,22 +7,24 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install Theos and Dependencies
+    - name: Set up Theos and iOS SDK
       run: |
-        export THEOS=~/theos
-        git clone --recursive https://github.com/theos/theos.git $THEOS
+        echo "=== Installing Theos ==="
+        git clone --recursive https://github.com/theos/theos.git ~/theos
+        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+        
+        echo "=== Installing iOS SDKs ==="
         git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
-        echo "THEOS=$THEOS" >> $GITHUB_ENV
 
-    - name: Build Mod Menu Package (.dylib & .deb)
+    - name: Compile and Package Mod Menu
       run: |
-        export THEOS=~/theos
+        export THEOS=$HOME/theos
         make clean
         make package FINALPACKAGE=1
 
