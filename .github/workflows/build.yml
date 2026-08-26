@@ -1,0 +1,45 @@
+# GitHub Actions Workflow - Auto Build iOS Mod Menu (.dylib & .deb)
+name: Build iOS Mod Menu
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        submodules: recursive
+
+    - name: Install Theos and Dependencies
+      run: |
+        echo "=== Installing Theos ==="
+        export THEOS=~/theos
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        
+        echo "=== Installing iOS SDK ==="
+        git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
+        
+        echo "=== Setting Environment Variables ==="
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
+
+    - name: Build Mod Menu Package (.dylib & .deb)
+      run: |
+        export THEOS=~/theos
+        make clean
+        make package FINALPACKAGE=1
+
+    - name: Upload .deb and .dylib Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: Kritika_v5.30.2_ModMenu
+        path: |
+          packages/*.deb
+          .theos/obj/debug/*.dylib

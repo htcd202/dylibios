@@ -1,0 +1,9 @@
+Package: com.gamevil.kritikam.modmenu
+Name: Kritika: The White Knights Mod Menu
+Depends: mobilesubstrate
+Version: 5.30.2
+Architecture: iphoneos-arm
+Description: Floating Mod Menu for Kritika v5.30.2 (God Mode, Dame Slider x20, Speed x10, Dumb AI, Lv 1 Monsters, Inf Mana)
+Maintainer: TBC
+Author: TBC
+Section: Tweaks
